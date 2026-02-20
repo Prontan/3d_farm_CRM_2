@@ -1,0 +1,5 @@
+{
+  "name": "3D Farm CRM v2",
+  "description": "A minimalistic CRM for managing a 3D printing farm, optimized for tablets. Handles order queues, printer scheduling, assembly, and packing workflows.",
+  "requestFramePermissions": []
+}
