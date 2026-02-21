@@ -1,8 +1,9 @@
 ﻿import React, { useMemo } from 'react';
 import { Order, Printer, ProductTemplate, OrderStatus, Plate, ColorDef } from '../types';
 import { OrderCard } from './OrderCard';
-import { Check, RotateCcw, Zap, Combine, Eraser, Scissors } from 'lucide-react';
+import { Check, RotateCcw, Zap, Combine, Eraser, Scissors, Calendar } from 'lucide-react';
 import { resolveColorHex, getTextColor, isLightColor } from '../constants';
+import { toDayKeyInLA, nextDayKey, isWorkingDayKey } from '../utils/deadlines';
 
 interface PrintingTabProps {
   orders: Order[];
@@ -37,6 +38,9 @@ interface PlateGroup {
     status: OrderStatus;
     orderIndex: number;
   }[];
+  // Internal UI flags dynamically calculated per day
+  isExtended?: boolean;
+  isOverflown?: boolean;
 }
 
 const buildGroupKeys = (plate: Plate, colors: string[], batchId?: string | null) => {
@@ -149,7 +153,7 @@ export const PrintingTab: React.FC<PrintingTabProps> = ({
     e.dataTransfer.effectAllowed = 'move';
   };
 
-  const handleBatchDragStart = (e: React.DragEvent, items: {orderId: string, plateId: string}[], group: PlateGroup) => {
+  const handleBatchDragStart = (e: React.DragEvent, items: { orderId: string, plateId: string }[], group: PlateGroup) => {
     e.stopPropagation();
     e.dataTransfer.setData('application/json', JSON.stringify({
       type: 'BATCH',
@@ -327,36 +331,21 @@ export const PrintingTab: React.FC<PrintingTabProps> = ({
       </div>
 
       <div className="flex-1 overflow-x-auto overflow-y-auto p-6">
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 gap-6 items-stretch mb-20">
-          {activePrinters.map(printer => {
-            const groups = groupedPlatesByPrinter[printer.id] || [];
+        <div className="flex flex-col gap-6 items-stretch mb-20 min-w-max">
 
-            const assignedJobs = groups.reduce((acc, g) => acc + g.items.filter(i => i.status === OrderStatus.ASSIGNED).length, 0);
-            const printMinutes = groups.reduce((acc, g) => {
-              const count = g.items.filter(i => i.status === OrderStatus.ASSIGNED).length;
-              return acc + count * g.plate.printTimeMinutes;
-            }, 0);
-            const totalMinutes = printMinutes + Math.max(0, assignedJobs - 1) * 10;
-
-            const normalLimit = 12 * 60;
-            const extendedLimit = 20 * 60;
-            const hasExtendedOrders = groups.some(g => g.items.some(i => i.order.usesExtendedHours));
-            const displayLimit = (hasExtendedOrders || totalMinutes > normalLimit) ? extendedLimit : normalLimit;
-            const usagePercent = Math.min((totalMinutes / displayLimit) * 100, 100);
-            const isOverloaded = totalMinutes > extendedLimit;
-            const isExtended = !isOverloaded && totalMinutes > normalLimit;
-
-            return (
+          {/* Global Printer Header Row */}
+          <div className="flex gap-6 sticky top-0 z-20 bg-slate-100 pt-2 pb-4">
+            {activePrinters.map(printer => (
               <div
-                key={printer.id}
+                key={`header-${printer.id}`}
                 draggable
                 onDragStart={(e) => handlePrinterDragStart(e, printer.id)}
                 onDragOver={handleDragOver}
                 onDrop={(e) => handleDropOnPrinter(e, printer.id)}
-                className="flex flex-col bg-white rounded-2xl shadow-sm border border-slate-200 h-full overflow-hidden cursor-move transition-transform active:scale-[0.99]"
+                className="w-[320px] lg:w-[350px] flex-shrink-0 bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden cursor-move hover:border-indigo-300 transition-colors"
               >
-                <div className="p-5 border-b border-slate-100 flex-shrink-0">
-                  <div className="flex justify-between items-start mb-3">
+                <div className="p-4 border-b border-slate-100">
+                  <div className="flex justify-between items-start mb-2">
                     <div className="flex-1 min-w-0">
                       <h3 className="text-xl font-bold text-slate-800 truncate">{printer.name}</h3>
                       <div className="flex flex-wrap gap-1.5 mt-2">
@@ -372,138 +361,261 @@ export const PrintingTab: React.FC<PrintingTabProps> = ({
                       {printer.isMultiColor ? 'Multi' : 'Single'}
                     </span>
                   </div>
-
-                  <div className="mt-4">
-                    <div className="flex justify-between text-sm font-medium mb-1.5">
-                      <span className={isOverloaded ? 'text-red-600 font-bold' : (isExtended ? 'text-orange-600 font-bold' : 'text-slate-600')}>
-                        {Math.floor(Math.ceil(totalMinutes) / 60)}ч {Math.ceil(totalMinutes) % 60}м / {Math.floor(displayLimit / 60)}ч
-                      </span>
-                      <span className="text-slate-500">{Math.round(usagePercent)}%</span>
-                    </div>
-                    <div className="h-3 w-full bg-slate-100 rounded-full overflow-hidden">
-                      <div
-                        className={`h-full transition-all duration-500 ${isOverloaded ? 'bg-red-500' : (isExtended ? 'bg-orange-500' : 'bg-emerald-500')}`}
-                        style={{ width: `${usagePercent}%` }}
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                <div className="p-4 space-y-3 min-h-[220px] bg-white flex-1 flex flex-col">
-                  {groups.length === 0 && (
-                    <div className="flex-1 flex items-center justify-center text-center text-slate-400 text-base border-2 border-dashed border-slate-200 rounded-xl m-2 pointer-events-none">
-                      Free
-                    </div>
-                  )}
-
-                  {groups.map(group => {
-                    const assignedItems = group.items.filter(i => i.status === OrderStatus.ASSIGNED);
-                    const printedItems = group.items.filter(i => i.status === OrderStatus.PRINTED);
-                    const allDone = assignedItems.length === 0 && printedItems.length > 0;
-                    const progressText = allDone ? 'Done' : `${printedItems.length} / ${group.items.length}`;
-
-                    return (
-                      <div
-                        key={group.key}
-                        draggable={!allDone && assignedItems.length > 0}
-                        onDragStart={(e) => {
-                          const items = assignedItems.map(i => ({ orderId: i.orderId, plateId: i.plateId }));
-                          if (items.length > 0) {
-                            handleBatchDragStart(e, items, group);
-                          }
-                        }}
-                        onDragOver={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          e.dataTransfer.dropEffect = 'copy';
-                        }}
-                        onDrop={(e) => handleDropOnGroup(e, printer.id, group)}
-                        className={`relative p-3 rounded-xl border flex flex-col gap-2 transition-all ${allDone ? 'bg-emerald-50 border-emerald-200' : 'bg-white border-indigo-100 shadow-sm hover:shadow-md ring-1 ring-indigo-50 hover:ring-indigo-300'}`}
-                      >
-                        <div className="flex items-start gap-3">
-                          <img
-                            src={group.plate.photoUrl || group.template.photoUrl}
-                            className="w-12 h-12 rounded-lg bg-slate-100 object-cover border border-slate-100"
-                            alt={group.plate.name}
-                          />
-
-                          <div className="min-w-0 flex-1">
-                            <div className="font-bold text-slate-800 text-sm leading-tight mb-0.5 line-clamp-2">{group.plate.name}</div>
-                            <div className="text-xs text-slate-500 truncate">{group.template.name}</div>
-                            <div className="mt-1.5 flex flex-wrap gap-1.5">
-                              {group.colors.map(c => {
-                                const hex = resolveColorHex(c, colorDefs);
-                                const light = isLightColor(hex);
-                                return (
-                                  <span
-                                    key={c}
-                                    className="text-sm font-extrabold px-2.5 py-1 rounded border shadow-sm uppercase tracking-wide"
-                                    style={{
-                                      backgroundColor: hex,
-                                      color: getTextColor(hex),
-                                      borderColor: light ? '#cbd5e1' : hex
-                                    }}
-                                  >
-                                    {c}
-                                  </span>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        </div>
-
-                        <div className="flex items-center justify-between pt-2 border-t border-slate-100 mt-1">
-                          <div className="text-xs font-bold text-slate-400">{group.plate.printTimeMinutes}м • {progressText}</div>
-
-                          {!allDone ? (
-                            <div className="flex gap-1.5">
-                              {assignedItems.length > 1 && (
-                                <button
-                                  onClick={() => splitGroup(group)}
-                                  className="bg-slate-100 hover:bg-slate-200 text-slate-600 p-1.5 rounded-lg border border-slate-200"
-                                  title="Split batch"
-                                >
-                                  <Scissors size={14} />
-                                </button>
-                              )}
-                              <button
-                                onClick={() => completeGroup(group)}
-                                className="bg-emerald-100 hover:bg-emerald-200 text-emerald-700 px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1"
-                              >
-                                <Check size={12} /> Done
-                              </button>
-                            </div>
-                          ) : (
-                            <div className="flex items-center gap-2">
-                              <span className="text-xs font-bold text-emerald-600">Completed</span>
-                              {onRevertBatch && printedItems.length > 0 && (
-                                <button
-                                  onClick={() => onRevertBatch(printedItems.map(i => ({ orderId: i.orderId, plateId: i.plateId })))}
-                                  className="p-1 hover:bg-red-50 text-slate-400 hover:text-red-500 rounded transition-colors"
-                                  title="Revert batch"
-                                >
-                                  <RotateCcw size={14} />
-                                </button>
-                              )}
-                            </div>
-                          )}
-                        </div>
-
-                        {group.items.length > 0 && (
-                          <div className="absolute top-0 left-0 h-1 bg-slate-200 w-full rounded-t-xl overflow-hidden">
-                            <div
-                              className={`h-full transition-all ${allDone ? 'bg-emerald-500' : 'bg-indigo-500'}`}
-                              style={{ width: `${(printedItems.length / group.items.length) * 100}%` }}
-                            />
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
                 </div>
               </div>
-            );
-          })}
+            ))}
+          </div>
+
+          {/* Day Grid Rows */}
+          {(() => {
+            // First pass: distribute groups across days for each printer
+            const daysMap: Record<string, Record<string, PlateGroup[]>> = {};
+            const uniqueDays = new Set<string>();
+
+            activePrinters.forEach(printer => {
+              const groups = groupedPlatesByPrinter[printer.id] || [];
+              let currentDayKey = toDayKeyInLA(Date.now());
+              while (!isWorkingDayKey(currentDayKey)) {
+                currentDayKey = nextDayKey(currentDayKey);
+              }
+
+              let accumulatedMinutes = 0;
+              uniqueDays.add(currentDayKey);
+              if (!daysMap[currentDayKey]) daysMap[currentDayKey] = {};
+              if (!daysMap[currentDayKey][printer.id]) daysMap[currentDayKey][printer.id] = [];
+
+              groups.forEach(group => {
+                const usesExtended = group.items.some(i => i.order.usesExtendedHours);
+                const maxMinutes = usesExtended ? 20 * 60 : 12 * 60;
+
+                const assignedItems = group.items.filter(i => i.status === OrderStatus.ASSIGNED);
+                const groupMinutes = assignedItems.length * group.plate.printTimeMinutes + (assignedItems.length > 0 ? 10 : 0);
+
+                let isOverflown = false;
+                let isExtended = false;
+
+                if (accumulatedMinutes + groupMinutes > 20 * 60 && accumulatedMinutes > 0) {
+                  currentDayKey = nextDayKey(currentDayKey);
+                  while (!isWorkingDayKey(currentDayKey)) {
+                    currentDayKey = nextDayKey(currentDayKey);
+                  }
+                  accumulatedMinutes = 0;
+                  uniqueDays.add(currentDayKey);
+                  if (!daysMap[currentDayKey]) daysMap[currentDayKey] = {};
+                  if (!daysMap[currentDayKey][printer.id]) daysMap[currentDayKey][printer.id] = [];
+                  isOverflown = true;
+                } else if (accumulatedMinutes + groupMinutes > 12 * 60) {
+                  isExtended = true;
+                }
+
+                daysMap[currentDayKey][printer.id].push({
+                  ...group,
+                  isExtended,
+                  isOverflown
+                });
+                accumulatedMinutes += groupMinutes;
+              });
+            });
+
+            const sortedDays = Array.from(uniqueDays).sort();
+
+            const formatDay = (dk: string) => {
+              const [y, m, d] = dk.split('-');
+              const date = new Date(Date.UTC(Number(y), Number(m) - 1, Number(d)));
+              return new Intl.DateTimeFormat('ru-RU', { month: 'long', day: 'numeric', weekday: 'short' }).format(date);
+            };
+
+            return sortedDays.map(dayKey => {
+              const printersData = activePrinters.map(printer => {
+                const groups = daysMap[dayKey]?.[printer.id] || [];
+                const assignedJobs = groups.reduce((acc, g) => acc + g.items.filter(i => i.status === OrderStatus.ASSIGNED).length, 0);
+                const printMinutes = groups.reduce((acc, g) => {
+                  const count = g.items.filter(i => i.status === OrderStatus.ASSIGNED).length;
+                  return acc + count * g.plate.printTimeMinutes;
+                }, 0);
+                const totalMinutes = printMinutes + Math.max(0, assignedJobs - 1) * 10;
+
+                const normalLimit = 12 * 60;
+                const extendedLimit = 20 * 60;
+                const hasExtendedOrders = groups.some(g => g.items.some(i => i.order.usesExtendedHours));
+                const displayLimit = (hasExtendedOrders || totalMinutes > normalLimit) ? extendedLimit : normalLimit;
+                const usagePercent = Math.min((totalMinutes / displayLimit) * 100, 100);
+                const isOverloaded = totalMinutes > extendedLimit;
+                const isExtended = !isOverloaded && totalMinutes > normalLimit;
+
+                return { groups, totalMinutes, displayLimit, usagePercent, isOverloaded, isExtended, printerId: printer.id };
+              });
+
+              // Skip empty days where NO printers have jobs
+              if (printersData.every(p => p.groups.length === 0)) return null;
+
+              return (
+                <div key={dayKey} className="flex flex-col mb-4">
+                  {/* Day Divider Line */}
+                  <div className="flex items-center gap-4 mb-4">
+                    <div className="flex-1 h-px bg-slate-300"></div>
+                    <div className="flex items-center gap-2 px-4 py-1.5 rounded-full text-sm font-bold text-slate-600 bg-white border-2 border-slate-300 shadow-sm uppercase tracking-wider">
+                      <Calendar size={16} className="text-slate-500" />
+                      {formatDay(dayKey)}
+                    </div>
+                    <div className="flex-1 h-px bg-slate-300"></div>
+                  </div>
+
+                  {/* Horizontal Grid Row for Printers */}
+                  <div className="flex gap-6">
+                    {printersData.map(pData => (
+                      <div
+                        key={`${dayKey}-${pData.printerId}`}
+                        className="w-[320px] lg:w-[350px] flex-shrink-0 bg-white rounded-xl shadow-sm border border-slate-200 flex flex-col min-h-[150px]"
+                        onDragOver={handleDragOver}
+                        onDrop={(e) => handleDropOnPrinter(e, pData.printerId)}
+                      >
+                        {/* Daily Shift Progress Bar */}
+                        <div className="p-3 border-b border-slate-100 bg-slate-50/50 rounded-t-xl">
+                          <div className="flex justify-between text-xs font-bold mb-1.5">
+                            <span className={pData.isOverloaded ? 'text-red-600' : (pData.isExtended ? 'text-orange-600' : 'text-slate-600')}>
+                              {Math.floor(Math.ceil(pData.totalMinutes) / 60)}ч {Math.ceil(pData.totalMinutes) % 60}м / {Math.floor(pData.displayLimit / 60)}ч
+                            </span>
+                            <span className="text-slate-500">{Math.round(pData.usagePercent)}%</span>
+                          </div>
+                          <div className="h-2 w-full bg-slate-200 rounded-full overflow-hidden">
+                            <div
+                              className={`h-full transition-all duration-500 ${pData.isOverloaded ? 'bg-red-500' : (pData.isExtended ? 'bg-orange-500' : 'bg-emerald-500')}`}
+                              style={{ width: `${pData.usagePercent}%` }}
+                            />
+                          </div>
+                        </div>
+
+                        {/* Shift Body (Cards) */}
+                        <div className="p-3 space-y-3 flex-1 flex flex-col">
+                          {pData.groups.length === 0 && (
+                            <div className="flex-1 flex items-center justify-center text-center text-slate-400 text-sm border-2 border-dashed border-slate-200 rounded-lg pointer-events-none p-4">
+                              Свободно (0ч)
+                            </div>
+                          )}
+
+                          {pData.groups.map(group => {
+                            const assignedItems = group.items.filter(i => i.status === OrderStatus.ASSIGNED);
+                            const printedItems = group.items.filter(i => i.status === OrderStatus.PRINTED);
+                            const allDone = assignedItems.length === 0 && printedItems.length > 0;
+                            const progressText = allDone ? 'Done' : `${printedItems.length} / ${group.items.length}`;
+
+                            return (
+                              <div
+                                key={group.key}
+                                draggable={!allDone && assignedItems.length > 0}
+                                onDragStart={(e) => {
+                                  const items = assignedItems.map(i => ({ orderId: i.orderId, plateId: i.plateId }));
+                                  if (items.length > 0) {
+                                    handleBatchDragStart(e, items, group);
+                                  }
+                                }}
+                                onDragOver={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  e.dataTransfer.dropEffect = 'copy';
+                                }}
+                                onDrop={(e) => handleDropOnGroup(e, pData.printerId, group)}
+                                className={`relative p-3 rounded-lg border flex flex-col gap-2 transition-all 
+                                  ${allDone ? 'bg-emerald-50 border-emerald-200'
+                                    : group.isOverflown ? 'bg-red-50 border-red-200 ring-1 ring-red-100 hover:ring-red-300'
+                                      : group.isExtended ? 'bg-orange-50 border-orange-200 ring-1 ring-orange-100 hover:ring-orange-300'
+                                        : 'bg-white border-indigo-100 shadow-sm hover:shadow-md ring-1 ring-indigo-50 hover:ring-indigo-300'}`}
+                              >
+                                <div className="flex items-start gap-3">
+                                  <img
+                                    src={group.plate.photoUrl || group.template.photoUrl}
+                                    className="w-10 h-10 rounded-md bg-slate-100 object-cover border border-slate-200"
+                                    alt={group.plate.name}
+                                  />
+
+                                  <div className="min-w-0 flex-1">
+                                    <div className="font-bold text-slate-800 text-xs leading-tight mb-0.5 line-clamp-2">{group.plate.name}</div>
+                                    <div className="text-[10px] text-slate-500 truncate">{group.template.name}</div>
+                                    <div className="mt-1 flex flex-wrap gap-1">
+                                      {group.colors.map(c => {
+                                        const hex = resolveColorHex(c, colorDefs);
+                                        const light = isLightColor(hex);
+                                        return (
+                                          <span
+                                            key={c}
+                                            className="text-[10px] font-extrabold px-1.5 py-0.5 rounded border shadow-sm uppercase tracking-wide"
+                                            style={{
+                                              backgroundColor: hex,
+                                              color: getTextColor(hex),
+                                              borderColor: light ? '#cbd5e1' : hex
+                                            }}
+                                          >
+                                            {c}
+                                          </span>
+                                        );
+                                      })}
+                                    </div>
+                                  </div>
+                                </div>
+
+                                <div className="flex items-center justify-between pt-1.5 border-t border-slate-100 mt-0.5">
+                                  <div className="text-[10px] font-bold text-slate-400">{group.plate.printTimeMinutes}м • {progressText}</div>
+
+                                  {!allDone ? (
+                                    <div className="flex gap-1">
+                                      {assignedItems.length > 1 && (
+                                        <button
+                                          onClick={() => splitGroup(group)}
+                                          className="bg-slate-100 hover:bg-slate-200 text-slate-600 p-1 rounded-md border border-slate-200"
+                                          title="Split batch"
+                                        >
+                                          <Scissors size={12} />
+                                        </button>
+                                      )}
+                                      <button
+                                        onClick={() => completeGroup(group)}
+                                        className="bg-emerald-100 hover:bg-emerald-200 text-emerald-700 px-2 py-1 rounded-md text-[10px] font-bold flex items-center gap-1"
+                                      >
+                                        <Check size={10} /> Done
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <div className="flex items-center gap-1.5">
+                                      <span className="text-[10px] font-bold text-emerald-600">Completed</span>
+                                      {onRevertBatch && printedItems.length > 0 && (
+                                        <button
+                                          onClick={() => onRevertBatch(printedItems.map(i => ({ orderId: i.orderId, plateId: i.plateId })))}
+                                          className="p-1 hover:bg-red-50 text-slate-400 hover:text-red-500 rounded transition-colors"
+                                          title="Revert batch"
+                                        >
+                                          <RotateCcw size={12} />
+                                        </button>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+
+                                {group.items.length > 0 && (
+                                  <div className="absolute top-0 left-0 h-[3px] bg-slate-200 w-full rounded-t-lg overflow-hidden flex">
+                                    <div
+                                      className={`h-full transition-all ${allDone ? 'bg-emerald-500' : 'bg-indigo-500'}`}
+                                      style={{ width: `${(printedItems.length / group.items.length) * 100}%` }}
+                                    />
+                                    {!allDone && group.isOverflown && (
+                                      <div className="h-full bg-red-500 transition-all flex-1" />
+                                    )}
+                                    {!allDone && group.isExtended && !group.isOverflown && (
+                                      <div className="h-full bg-orange-500 transition-all flex-1" />
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            });
+          })()}
         </div>
       </div>
     </div>
